@@ -4,7 +4,7 @@
   <parent>
     <groupId>com.twitter.ambrose</groupId>
     <artifactId>ambrose</artifactId>
-    <version>0.2.7-SNAPSHOT</version>
+    <version>0.3.1-SNAPSHOT</version>
     <relativePath>..</relativePath>
   </parent>
 
@@ -51,6 +51,10 @@
       <groupId>com.thoughtworks.xstream</groupId>
       <artifactId>xstream</artifactId>
     </dependency>
+    <dependency>
+       <groupId>org.reflections</groupId>
+       <artifactId>reflections</artifactId>
+    </dependency>
 
     <!-- web -->
     <dependency>
@@ -69,8 +73,17 @@
     <!-- hadoop -->
     <dependency>
       <groupId>org.apache.hadoop</groupId>
-      <artifactId>hadoop-mapred</artifactId>
+      <artifactId>hadoop-core</artifactId>
+    </dependency>
+
+    <!-- hraven -->
+    <dependency>
+       <groupId>com.twitter.hraven</groupId>
+       <artifactId>hraven-core</artifactId>
+    </dependency>
+    <dependency>
+       <groupId>org.apache.hbase</groupId>
+       <artifactId>hbase</artifactId>
     </dependency>
   </dependencies>
-
 </project>

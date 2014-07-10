@@ -21,16 +21,18 @@ import java.io.PrintWriter;
 import java.io.Writer;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Properties;
 import java.util.SortedMap;
 import java.util.concurrent.ConcurrentSkipListMap;
-
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Maps;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.twitter.ambrose.model.DAGNode;
 import com.twitter.ambrose.model.Event;
 import com.twitter.ambrose.model.Job;
@@ -179,5 +181,22 @@ public class InMemoryStatsService implements StatsReadService, StatsWriteService
       }
       eventsWriter.close();
     }
+  }
+
+  @Override
+  public Collection<Event> getEventsSinceId(String workflowId, int sinceId,
+    int maxEvents) throws IOException {
+    int minId = sinceId >= 0 ? sinceId + 1 : sinceId;
+    return Lists.newArrayList(Iterables.limit(eventMap.tailMap(minId).values(), maxEvents));
+  }
+
+  @Override
+  public void initWriteService(Properties properties) throws IOException {
+    // Do nothing
+  }
+
+  @Override
+  public void initReadService(Properties properties) throws IOException {
+    // Do nothing
   }
 }

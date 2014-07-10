@@ -4,7 +4,7 @@
   <parent>
     <groupId>com.twitter.ambrose</groupId>
     <artifactId>ambrose</artifactId>
-    <version>0.2.7-SNAPSHOT</version>
+    <version>0.3.1-SNAPSHOT</version>
     <relativePath>..</relativePath>
   </parent>
 
@@ -60,8 +60,7 @@
     <!-- Hive doesn't support Hadoop 0.22 used by the parent project  -->
     <dependency>
       <groupId>org.apache.hadoop</groupId>
-      <artifactId>hadoop-client</artifactId>
-      <version>0.23.9</version>
+      <artifactId>hadoop-core</artifactId>
       <exclusions>
         <exclusion>
           <groupId>commons-daemon</groupId>
@@ -107,7 +106,7 @@
       <artifactId>jdo-api</artifactId>
       <version>3.0.1</version>
     </dependency>
-    
+
   </dependencies>
 
   <build>

@@ -12,23 +12,22 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-*/
+ */
 package com.twitter.ambrose.pig;
 
-import com.google.common.base.Joiner;
-import com.twitter.ambrose.model.DAGNode;
-import com.twitter.ambrose.model.Event;
-import com.twitter.ambrose.model.Job;
-import com.twitter.ambrose.model.Workflow;
-import com.twitter.ambrose.model.hadoop.MapReduceJobState;
-import com.twitter.ambrose.service.StatsWriteService;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapred.JobClient;
-import org.apache.hadoop.mapred.JobID;
-import org.apache.hadoop.mapred.RunningJob;
-import org.apache.hadoop.mapred.TaskReport;
+import org.apache.pig.backend.hadoop.datastorage.ConfigurationUtil;
 import org.apache.pig.backend.hadoop.executionengine.mapReduceLayer.MapReduceOper;
 import org.apache.pig.backend.hadoop.executionengine.mapReduceLayer.plans.MROperPlan;
 import org.apache.pig.impl.plan.OperatorKey;
@@ -37,18 +36,19 @@ import org.apache.pig.tools.pigstats.OutputStats;
 import org.apache.pig.tools.pigstats.PigProgressNotificationListener;
 import org.apache.pig.tools.pigstats.PigStats;
 import org.apache.pig.tools.pigstats.ScriptState;
-import org.apache.pig.tools.pigstats.PigStats.JobGraph;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.twitter.ambrose.model.DAGNode;
+import com.twitter.ambrose.model.Event;
+import com.twitter.ambrose.model.Job;
+import com.twitter.ambrose.model.Workflow;
+import com.twitter.ambrose.model.hadoop.MapReduceHelper;
+import com.twitter.ambrose.service.StatsWriteService;
+import com.twitter.ambrose.util.AmbroseUtils;
+import com.twitter.ambrose.service.impl.InMemoryStatsService;
 
 /**
  * PigProgressNotificationListener that collects plan and job information from within a Pig runtime,
@@ -57,13 +57,12 @@ import com.google.common.collect.Sets;
  *
  * @see EmbeddedAmbrosePigProgressNotificationListener for a sublclass that can be used to run an
  * embedded Abrose web server from Pig client process.
+ * 
+ * This PPNL should be used as a base class for concrete implementations that provide a way of
+ * reading, writing 
  *
  */
-@SuppressWarnings("deprecation")
-public class AmbrosePigProgressNotificationListener implements PigProgressNotificationListener,
-    JobClientHandler {
-
-  private static final Joiner COMMA_JOINER = Joiner.on(',');
+public class AmbrosePigProgressNotificationListener implements PigProgressNotificationListener {
   protected Log log = LogFactory.getLog(getClass());
   private StatsWriteService statsWriteService;
   private String workflowVersion;
@@ -71,8 +70,39 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
   private Map<String, DAGNode<PigJob>> dagNodeNameMap = Maps.newTreeMap();
   private Map<String, DAGNode<PigJob>> dagNodeJobIdMap = Maps.newTreeMap();
   private Set<String> completedJobIds = Sets.newHashSet();
-  private JobClient jobClient;
-  private PigStats.JobGraph jobGraph;
+  // subclasses can access this to set pig's configuration in multithreaded PPNL
+  PigConfig pigConfig = new PigConfig();
+
+  // We encapsulate jobClient, jobGraph, pigProperties under static class
+  // to avoid accidental usage of these parameters in the outer class.
+  // These should be only accessed through the getter apis.
+  public static class PigConfig {
+    private JobClient jobClient;
+    private PigStats.JobGraph jobGraph;
+    private Properties pigProperties;
+    // Pig will make sure that jobClient and jobGraph is initialized before initialPlanNotification is called
+
+    public JobClient getJobClient() {
+      return (jobClient != null) ? jobClient : PigStats.get().getJobClient();
+    }
+    public void setJobClient(JobClient jobClient) {
+      this.jobClient = jobClient;
+    }
+    public PigStats.JobGraph getJobGraph() {
+      return (jobGraph != null) ? jobGraph : PigStats.get().getJobGraph();
+    }
+    public void setJobGraph(PigStats.JobGraph jobGraph) {
+      this.jobGraph = jobGraph;
+    }
+    public Properties getPigProperties() {
+      return (pigProperties != null) ? pigProperties : PigStats.get().getPigProperties();
+    }
+    public void setPigProperties(Properties pigProperties) {
+      this.pigProperties = pigProperties;
+    }
+  }
+
+  private MapReduceHelper mapReduceHelper = new MapReduceHelper();
 
   /**
    * Initialize this class with an instance of StatsWriteService to push stats to.
@@ -92,22 +122,51 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
    */
   @Override
   public void initialPlanNotification(String scriptId, MROperPlan plan) {
-    Map<OperatorKey, MapReduceOper>  planKeys = plan.getKeys();
+    log.info("initialPlanNotification - scriptId " + scriptId + " plan " + plan);
+
+    // For ambrose to work above 3 must be non-null
+    Preconditions.checkNotNull(pigConfig.getJobClient());
+    Preconditions.checkNotNull(pigConfig.getJobGraph());
+    Preconditions.checkNotNull(pigConfig.getPigProperties());
+
+    try {
+      statsWriteService.initWriteService(pigConfig.getPigProperties());
+    } catch (IOException ioe) {
+      throw new RuntimeException("Exception while initializing statsWriteService", ioe);
+    }
+    this.workflowVersion = pigConfig.getPigProperties().getProperty("pig.logical.plan.signature");
+
+    Map<OperatorKey, MapReduceOper> planKeys = plan.getKeys();
+    
+    Configuration flowConfig = new Configuration(false);
+    boolean initialized = false;
 
     // first pass builds all nodes
     for (Map.Entry<OperatorKey, MapReduceOper> entry : planKeys.entrySet()) {
       String nodeName = entry.getKey().toString();
-      String[] aliases = toArray(ScriptState.get().getAlias(entry.getValue()).trim());
-      String[] features = toArray(ScriptState.get().getPigFeature(entry.getValue()).trim());
+      MapReduceOper mrOper = entry.getValue();
+      String[] aliases = toArray(ScriptState.get().getAlias(mrOper).trim());
+      String[] features = toArray(ScriptState.get().getPigFeature(mrOper).trim());
+      
+      if (!initialized) {
+    	  ScriptState.get().addSettingsToConf(mrOper, flowConfig);
+    	  pigConfig.getPigProperties().putAll(ConfigurationUtil.toProperties(flowConfig));
+    	  initialized = true;
+      }
 
-      DAGNode<PigJob> node = new DAGNode<PigJob>(nodeName, new PigJob(aliases, features));
+      PigJob job = new PigJob();
+      job.setAliases(aliases);
+      job.setFeatures(features);
+      job.setConfiguration(pigConfig.getPigProperties());
+
+      DAGNode<PigJob> node = new DAGNode<PigJob>(nodeName, job);
 
       this.dagNodeNameMap.put(node.getName(), node);
 
       // this shows how we can get the basic info about all nameless jobs before any execute.
       // we can traverse the plan to build a DAG of this info
-      log.info("initialPlanNotification: aliases: " + COMMA_JOINER.join(aliases) +
-          ", name: " + node.getName() + ", features: " + COMMA_JOINER.join(features));
+      log.info("initialPlanNotification: aliases: " + Arrays.toString(aliases) +
+          ", name: " + node.getName() + ", features: " + Arrays.toString(features));
     }
 
     // second pass connects the edges
@@ -123,15 +182,10 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
           successorNodeList.add(successorNode);
         }
       }
-
       node.setSuccessors(successorNodeList);
     }
 
-    try {
-      statsWriteService.sendDagNodeNameMap(scriptId, this.dagNodeNameMap);
-    } catch (IOException e) {
-      log.error("Couldn't send dag to StatsWriteService", e);
-    }
+    AmbroseUtils.sendDagNodeNameMap(statsWriteService, scriptId, dagNodeNameMap);
   }
 
   /**
@@ -142,25 +196,27 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
    */
   @Override
   public void jobStartedNotification(String scriptId, String assignedJobId) {
-    log.info("jobStartedNotification - jobId " + assignedJobId + ", jobGraph:\n" + getJobGraph());
+    log.info("jobStartedNotification - scriptId " + scriptId + "jobId " + assignedJobId);
 
     // for each job in the graph, check if the stats for a job with this name is found. If so, look
     // up it's scope and bind the jobId to the DAGNode with the same scope.
-    for (JobStats jobStats : getJobGraph()) {
+    for (JobStats jobStats : pigConfig.getJobGraph()) {
       if (assignedJobId.equals(jobStats.getJobId())) {
         log.info("jobStartedNotification - scope " + jobStats.getName() + " is jobId " + assignedJobId);
         DAGNode<PigJob> node = this.dagNodeNameMap.get(jobStats.getName());
 
         if (node == null) {
           log.warn("jobStartedNotification - unrecognized operator name found ("
-                  + jobStats.getName() + ") for jobId " + assignedJobId);
-        } else {
-          node.getJob().setId(assignedJobId);
-          addMapReduceJobState(node.getJob());
+              + jobStats.getName() + ") for jobId " + assignedJobId);
+          return;
+        } 
 
-          dagNodeJobIdMap.put(node.getJob().getId(), node);
-          pushEvent(scriptId, new Event.JobStartedEvent(node));
-        }
+        PigJob job = node.getJob();
+        job.setId(assignedJobId);
+        mapReduceHelper.addMapReduceJobState(job, pigConfig.getJobClient());
+
+        dagNodeJobIdMap.put(job.getId(), node);
+        AmbroseUtils.pushEvent(statsWriteService, scriptId, new Event.JobStartedEvent(node));
       }
     }
   }
@@ -172,6 +228,7 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
    */
   @Override
   public void jobFailedNotification(String scriptId, JobStats stats) {
+    log.info("jobFailedNotification - scriptId " + scriptId);
     if (stats.getJobId() == null) {
       log.warn("jobId for failed job not found. This should only happen in local mode");
       return;
@@ -183,8 +240,9 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
       return;
     }
 
+    mapReduceHelper.addMapReduceJobState(node.getJob(), pigConfig.getJobClient());
     addCompletedJobStats(node.getJob(), stats);
-    pushEvent(scriptId, new Event.JobFailedEvent(node));
+    AmbroseUtils.pushEvent(statsWriteService, scriptId, new Event.JobFailedEvent(node));
   }
 
   /**
@@ -194,14 +252,16 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
    */
   @Override
   public void jobFinishedNotification(String scriptId, JobStats stats) {
+    log.info("jobFinishedNotification - scriptId " + scriptId);
     DAGNode<PigJob> node = dagNodeJobIdMap.get(stats.getJobId());
     if (node == null) {
       log.warn("Unrecognized jobId reported for succeeded job: " + stats.getJobId());
       return;
     }
 
+    mapReduceHelper.addMapReduceJobState(node.getJob(), pigConfig.getJobClient());
     addCompletedJobStats(node.getJob(), stats);
-    pushEvent(scriptId, new Event.JobFinishedEvent(node));
+    AmbroseUtils.pushEvent(statsWriteService, scriptId, new Event.JobFinishedEvent(node));
   }
 
   /**
@@ -213,41 +273,42 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
    */
   @Override
   public void launchCompletedNotification(String scriptId, int numJobsSucceeded) {
-
-    if (workflowVersion == null) {
-      log.warn("scriptFingerprint not set for this script - not saving stats." );
-    } else {
-      Workflow workflow = new Workflow(scriptId, workflowVersion, jobs);
-
-      try {
-        outputStatsData(workflow);
-      } catch (IOException e) {
-        log.error("Exception outputting workflow", e);
-      }
+    Workflow workflow = new Workflow(scriptId, workflowVersion, jobs);
+    try {
+      outputStatsData(workflow);
+    } catch (IOException e) {
+      log.error("Exception outputting workflow", e);
     }
   }
 
   /**
-   * Called throught execution of the script with progress notifications.
+   * Called throughout execution of the script with progress notifications.
    * @param scriptId scriptId of the running script
    * @param progress is an integer between 0 and 100 the represents percent completion
    */
   @Override
   public void progressUpdatedNotification(String scriptId, int progress) {
+    log.info("progressUpdatedNotification - scriptId " + scriptId + " progress " + progress);
     // first we report the scripts progress
     Map<Event.WorkflowProgressField, String> eventData = Maps.newHashMap();
     eventData.put(Event.WorkflowProgressField.workflowProgress, Integer.toString(progress));
-    pushEvent(scriptId, new Event.WorkflowProgressEvent(eventData));
+    AmbroseUtils.pushEvent(statsWriteService, scriptId, new Event.WorkflowProgressEvent(eventData));
 
     // then for each running job, we report the job progress
     for (DAGNode<PigJob> node : dagNodeNameMap.values()) {
       // don't send progress events for unstarted jobs
-      if (node.getJob().getId() == null) { continue; }
-      addMapReduceJobState(node.getJob());
-
+      if (node.getJob().getId() == null) { 
+        continue;
+      }
       //only push job progress events for a completed job once
-      if (node.getJob().getMapReduceJobState() != null && !completedJobIds.contains(node.getJob().getId())) {
-        pushEvent(scriptId, new Event.JobProgressEvent(node));
+      if(completedJobIds.contains(node.getJob().getId())) {
+        continue;
+      }
+
+      mapReduceHelper.addMapReduceJobState(node.getJob(), pigConfig.getJobClient());
+
+      if (node.getJob().getMapReduceJobState() != null) {       
+        AmbroseUtils.pushEvent(statsWriteService, scriptId, new Event.JobProgressEvent(node));
 
         if (node.getJob().getMapReduceJobState().isComplete()) {
           completedJobIds.add(node.getJob().getId());
@@ -262,9 +323,6 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
   @Override
   public void jobsSubmittedNotification(String scriptId, int numJobsSubmitted) { }
 
-  /**
-   * Invoked just after an output is successfully written.
-   */
   @Override
   public void outputCompletedNotification(String scriptId, OutputStats outputStats) { }
 
@@ -272,26 +330,11 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
    * Collects statistics from JobStats and builds a nested Map of values.
    */
   private void addCompletedJobStats(PigJob job, JobStats stats) {
-
-    // put the job conf into a Properties object so we can serialize them
-    Properties jobConfProperties = new Properties();
-    if (stats.getInputs() != null && stats.getInputs().size() > 0 &&
-      stats.getInputs().get(0).getConf() != null) {
-
-      Configuration conf = stats.getInputs().get(0).getConf();
-      for (Map.Entry<String, String> entry : conf) {
-        jobConfProperties.setProperty(entry.getKey(), entry.getValue());
-      }
-
-      if (workflowVersion == null)  {
-        workflowVersion = conf.get("pig.logical.plan.signature");
-      }
-    }
-
     job.setJobStats(stats);
-    job.setConfiguration(jobConfProperties);
     jobs.add(job);
   }
+
+  // Helper methods
 
   private void outputStatsData(Workflow workflow) throws IOException {
     if(log.isDebugEnabled()) {
@@ -299,66 +342,7 @@ public class AmbrosePigProgressNotificationListener implements PigProgressNotifi
     }
   }
 
-  private void pushEvent(String scriptId, Event event) {
-    try {
-      statsWriteService.pushEvent(scriptId, event);
-    } catch (IOException e) {
-      log.error("Couldn't send event to StatsWriteService", e);
-    }
-  }
-
-  @SuppressWarnings("deprecation")
-  private void addMapReduceJobState(PigJob pigJob) {
-    JobClient jobClientLocal = getJobClient();
-
-    try {
-      String id = pigJob.getId();
-      RunningJob runningJob = jobClientLocal.getJob(id);
-      if (runningJob == null) {
-        log.warn("Couldn't find job status for jobId=" + pigJob.getId());
-        return;
-      }
-
-      JobID jobID = runningJob.getID();
-      TaskReport[] mapTaskReport = jobClientLocal.getMapTaskReports(jobID);
-      TaskReport[] reduceTaskReport = jobClientLocal.getReduceTaskReports(jobID);
-      pigJob.setMapReduceJobState(new MapReduceJobState(runningJob, mapTaskReport, reduceTaskReport));
-
-      Properties jobConfProperties = new Properties();
-      Configuration conf = jobClientLocal.getConf();
-      for (Map.Entry<String, String> entry : conf) {
-        jobConfProperties.setProperty(entry.getKey(), entry.getValue());
-      }
-      pigJob.setConfiguration(jobConfProperties);
-
-    } catch (IOException e) {
-      log.error("Error getting job info.", e);
-    }
-  }
-
   private static String[] toArray(String string) {
     return string == null ? new String[0] : string.trim().split(",");
-  }
-
-  @Override
-  public void setJobClient(JobClient jobClient) {
-    this.jobClient = jobClient;
-  }
-
-  private JobClient getJobClient() {
-    if (jobClient == null) { return PigStats.get().getJobClient(); }
-
-    return jobClient;
-  }
-
-  @Override
-  public void setJobGraph(PigStats.JobGraph jobGraph) {
-    this.jobGraph = jobGraph;
-  }
-
-  private JobGraph getJobGraph() {
-    if (jobGraph == null) { return PigStats.get().getJobGraph(); }
-
-    return jobGraph;
   }
 }

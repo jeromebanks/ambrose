@@ -8,6 +8,7 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import com.google.common.collect.Lists;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.BaseEncoding;
 
@@ -95,6 +96,7 @@ public class APIHandler extends AbstractHandler {
   private static final String QUERY_PARAM_START_KEY = "startKey";
   private static final String QUERY_PARAM_WORKFLOW_ID = "workflowId";
   private static final String QUERY_PARAM_LAST_EVENT_ID = "lastEventId";
+  private static final String QUERY_PARAM_MAX_EVENTS = "maxEvents";
   private static final String MIME_TYPE_HTML = "text/html";
   private static final String MIME_TYPE_JSON = "application/json";
   private WorkflowIndexReadService workflowIndexReadService;
@@ -138,7 +140,10 @@ public class APIHandler extends AbstractHandler {
       LOG.info("Submitted request for workflowId={}", workflowId);
       Map<String, DAGNode<Job>> dagNodeNameMap =
           statsReadService.getDagNodeNameMap(workflowId);
-      Collection<DAGNode<Job>> nodes = dagNodeNameMap.values();
+      Collection<DAGNode<Job>> nodes = Lists.newArrayList();
+      if (dagNodeNameMap != null) {
+        nodes = dagNodeNameMap.values();
+      }
 
       response.setContentType(MIME_TYPE_JSON);
       response.setStatus(HttpServletResponse.SC_OK);
@@ -147,10 +152,11 @@ public class APIHandler extends AbstractHandler {
     } else if (target.endsWith("/events")) {
       String lastEventIdParam = normalize(request.getParameter(QUERY_PARAM_LAST_EVENT_ID));
       Integer lastEventId = getInt(lastEventIdParam, -1);
+      
+      Integer maxEvents = getInt(request.getParameter(QUERY_PARAM_MAX_EVENTS), -1);
 
-      LOG.info("Submitted request for lastEventId={}", lastEventId);
       Collection<Event> events = statsReadService
-          .getEventsSinceId(request.getParameter(QUERY_PARAM_WORKFLOW_ID), lastEventId);
+          .getEventsSinceId(request.getParameter(QUERY_PARAM_WORKFLOW_ID), lastEventId, maxEvents);
 
       response.setContentType(MIME_TYPE_JSON);
       response.setStatus(HttpServletResponse.SC_OK);

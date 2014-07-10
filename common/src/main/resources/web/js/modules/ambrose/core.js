@@ -36,6 +36,10 @@ define(['lib/jquery'], function($) {
     return this.replace(separatorAlphaPattern, toUpper);
   };
 
+  String.prototype.b64_to_utf8 = function() {
+    return decodeURIComponent(escape(window.atob(this)));
+  };
+
   // find max value within array
   Array.prototype.max = function() {
     return Math.max.apply(Math, this);
@@ -45,6 +49,7 @@ define(['lib/jquery'], function($) {
   Array.prototype.min = function() {
     return Math.min.apply(Math, this);
   };
+
 
   // remove value from array
   Array.prototype.remove = function(object) {
@@ -58,6 +63,18 @@ define(['lib/jquery'], function($) {
     if (r.length === 1) r = '0' + r;
     return r;
   }
+
+  // Add commas to numbers.
+  String.prototype.commafy = function () {
+    return this.replace(/(^|[^\w.])(\d{4,})/g, function($0, $1, $2) {
+        return $1 + $2.replace(/\d(?=(?:\d\d\d)+(?!\d))/g, "$&,");
+    });
+  };
+
+  Number.prototype.commafy = function () {
+    return String(this).commafy();
+  };
+
 
   Number.prototype.formatTimestamp = function() {
     var date = new Date(this);
@@ -76,6 +93,17 @@ define(['lib/jquery'], function($) {
 
   // core Ambrose object, util methods
   return {
+    parseHRavenWorkflow : function(workflow) {
+      var splits = workflow.id.split("!");
+      var info = {};
+      if (splits.length == 6) {
+        info.cluster = splits[0];
+        info.user = splits[1];
+        info.id = splits[2];
+      }
+      return info;
+    },
+
     calculateElapsedTime : function(start, end) {
       var ms = Number(end) - Number(start);
 
